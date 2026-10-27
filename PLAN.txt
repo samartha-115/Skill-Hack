@@ -1,0 +1,144 @@
+We are building Problem 10: "Smart Canteen Hub with Live Kitchen KDS, Dietary Tags & Ready Alert" for our hackathon.
+Read our entire workspace and follow every instruction and constraint below.
+alter the MD file for commands to be run in terminal and Mongo shell
+
+================================================================================
+1. STRICT ARCHITECTURAL & HACKATHON CONSTRAINTS
+================================================================================
+- Stack: Node.js, Express, native 'mongodb' driver (DO NOT use Mongoose or any other ODM).
+- Packages: Strictly express, cors, and mongodb (already in package.json). No other npm packages.
+- Database: mongodb://127.0.0.1:27017, Database name: 'Hack_SmartCanteen'.
+- IDs: All MongoDB lookups must cast string IDs using `new ObjectId(id)` and return 400 if the ID is not a valid 24-character hex string.
+- Error format: Always return JSON in the format `{ "error": "Human-readable explanation" }`.
+- Client Trust Rule: The frontend NEVER calculates prices, totals, or prep times. The Express server retrieves values directly from MongoDB.
+- State Machine Rule: Statuses must strictly follow:
+  "placed" -> "preparing" -> "ready" -> "collected".
+  Any illegal jump or backward move must immediately return HTTP 400 Bad Request.
+
+================================================================================
+2. DATABASE SCHEMAS & BUSINESS RULES
+================================================================================
+A. `menu` collection:
+   - `_id`: ObjectId
+   - `name`: string (e.g., "Crispy Chicken Roll")
+   - `amount`: number (price in ₹, must be > 0)
+   - `availableUnits`: number (integer >= 0; physical stock count)
+   - `prepTime`: number (time taken to make in minutes, e.g., 10)
+   - `spiceLevel`: number (integer from 1 to 5, e.g., 0 + no spice, 5 = Extra Hot 🌶️🌶️🌶️🌶️🌶️)
+   - `dietaryType`: string (strictly one of: "veg", "egg", "non-veg")
+     - "veg" ➔ Rendered with 🥦 Veg
+     - "egg" ➔ Rendered with 🥚 Egg
+     - "non-veg" ➔ Rendered with 🥩 Non-Veg
+   - `category`: string ("Breakfast", "Snacks", "Beverages", "Meals")
+
+B. `orders` collection:
+   - `_id`: ObjectId
+   - `tokenNumber`: string (e.g., "T-101", sequential)
+   - `customerName`: string
+   - `usn`: string (uppercase, e.g., "1RV21CS001")
+   - `items`: array of { menuId: ObjectId, name: string, amount: number, qty: number, prepTime: number, spiceLevel: number, dietaryType: string }
+   - `totalAmount`: number (computed on server: sum of qty * item.amount)
+   - `estimatedPrepTime`: number (computed on server: max prepTime among ordered items, in minutes)
+   - `status`: string ("placed" | "preparing" | "ready" | "collected")
+   - `createdAt`: Date
+
+C. Critical Inventory & Concurrency Rule:
+   When placing an order (`POST /orders`):
+   - For each item, verify `availableUnits >= item.qty`.
+   - If stock is insufficient, return 409 Conflict: `{ "error": "Only X units of '<Item Name>' remaining in stock" }`.
+   - If sufficient, atomically decrement `availableUnits` by `qty` using MongoDB `$inc: { availableUnits: -qty }`.
+   - If an order is cancelled or an item is deleted, restore units.
+
+================================================================================
+3. REST API SPECIFICATION
+================================================================================
+- `GET /menu`: Fetch all menu items. Supports query filters:
+  - `?dietaryType=veg|egg|non-veg`
+  - `?maxSpice=1..5`
+  - `?category=...`
+- `POST /menu`: Add new menu item with strict validation:
+  - `name`: non-empty string
+  - `amount`: number > 0
+  - `availableUnits`: integer >= 0
+  - `prepTime`: number > 0
+  - `spiceLevel`: integer between 1 and 5 (return 400 if outside 1-5)
+  - `dietaryType`: must be "veg", "egg", or "non-veg" (return 400 if invalid)
+- `PATCH /menu/:id/stock`: Add or set `availableUnits` (restock item). Returns 200, 400, or 404.
+- `POST /orders`:
+  Accepts: `{ customerName, usn, items: [{ menuId, qty }] }`.
+  1. Validates non-empty customer name, valid USN format, valid ObjectIds, positive quantities.
+  2. Queries `menu` for all requested items. Returns 404 if any item doesn't exist.
+  3. Checks `availableUnits`. Returns 409 if requested quantity exceeds stock.
+  4. Calculates `totalAmount` and `estimatedPrepTime` server-side.
+  5. Atomically decrements `availableUnits` for each ordered item.
+  6. Inserts order with sequential token (e.g., "T-101") and status "placed". Returns 201.
+- `GET /orders`: Returns all active orders sorted by `createdAt` descending.
+- `GET /orders/:id`: Returns single order details (for customer token live tracker).
+- `PATCH /orders/:id/status`:
+  Accepts: `{ status }`.
+  Enforces transitions: "placed" -> "preparing" -> "ready" -> "collected".
+  Returns 400 if invalid jump; 404 if order not found; 200 on success.
+- `GET /orders/stats`: MongoDB `.aggregate()` returning:
+  `{ totalRevenue, totalOrders, activeOrdersCount, topSellingItem }`.
+
+================================================================================
+4. FRONTEND REQUIREMENTS (Vanilla HTML, CSS, JavaScript)
+================================================================================
+Build an intuitive, responsive single-page application with a tab switcher:
+
+View 1: Customer Food Hub & Live Token Tracker
+- Filter Bar: Quick filter buttons for:
+  - [All Items] [🥦 Veg Only] [🥚 Egg] [🥩 Non-Veg]
+  - Spice filter dropdown: [All Spices | 🌶️ Mild to 🌶️🌶️🌶️🌶️🌶️ Extra Hot]
+- Food Cards Display:
+  - Dietary Badge in corner: 🥦 Veg / 🥚 Egg / 🥩 Non-Veg
+  - Item Name & Price (`₹amount`)
+  - Spice Meter: Dynamic chilli emojis corresponding to spice level (e.g., `🌶️🌶️🌶️`)
+  - Prep Time Pill: `⏱ X mins`
+  - Stock Pill: `X units left` or red `Out of Stock` badge if 0
+  - "Add to Cart" button (disabled if units === 0)
+- Interactive Cart: Shows selected items, quantities, total amount, and customer details input (Name & USN).
+- Order Receipt Modal: Displays generated Token Number (e.g., "T-101") and Estimated Prep Time countdown.
+- Live Order Tracker:
+  - Polls `/orders/:id` every 4 seconds.
+  - Visual Step Progress Bar: Placed ➔ Preparing ➔ Ready for Pickup!
+- **DEVICE VIBRATION & SOUND ALERT FEATURE (Zero external libraries)**:
+  - When the order status transitions from "preparing" to "ready":
+    1. Trigger device vibration using standard HTML5 API:
+       `if (navigator.vibrate) { navigator.vibrate([300, 150, 300, 150, 500]); }`
+    2. Synthesize an audible alert chime using the native Web Audio API (`window.AudioContext` or `webkitAudioContext`) playing a cheerful two-tone alert chime (e.g., 523.25Hz -> 659.25Hz).
+    3. Show an animated banner: "🔔 YOUR FOOD IS READY! Token #T-XXX is waiting at the counter!"
+
+View 2: Kitchen Display System (KDS Kanban Board)
+- 3 Kanban Columns:
+  1. "Placed / New" (Blue) ➔ Action button: "Start Preparing" (moves to "preparing").
+  2. "Preparing" (Amber) ➔ Action button: "Mark Ready" (moves to "ready").
+  3. "Ready for Pickup" (Green) ➔ Action button: "Mark Collected" (moves to "collected").
+- Each ticket card highlights: Token #, Customer Name, Dietary Badges (🥦/🥚/🥩) per item, Spice Levels, Items + Quantities, and Elapsed Time.
+- Auto-refreshes every 6 seconds so the kitchen sees incoming orders in real time.
+- Top Metric Bar: Today's Revenue (₹), Total Orders Placed, and Active Kitchen Queue count from `/orders/stats`.
+
+================================================================================
+5. INITIAL SEED DATA
+================================================================================
+Seed the menu collection if empty with these diverse items:
+1. Masala Dosa: ₹60, 20 units, 8 mins, spiceLevel: 2 (🌶️🌶️), dietaryType: "veg" (🥦)
+2. Veg Samosa (2 pcs): ₹25, 15 units, 3 mins, spiceLevel: 3 (🌶️🌶️🌶️), dietaryType: "veg" (🥦)
+3. Egg Bhurji Roll: ₹55, 18 units, 6 mins, spiceLevel: 3 (🌶️🌶️🌶️), dietaryType: "egg" (🥚)
+4. Crispy Chicken Roll: ₹95, 14 units, 10 mins, spiceLevel: 4 (🌶️🌶️🌶️🌶️), dietaryType: "non-veg" (🥩)
+5. Spicy Hyderabadi Mutton Biryani: ₹160, 8 units, 15 mins, spiceLevel: 5 (🌶️🌶️🌶️🌶️🌶️), dietaryType: "non-veg" (🥩)
+6. Paneer Butter Masala Meal: ₹120, 10 units, 12 mins, spiceLevel: 2 (🌶️🌶️), dietaryType: "veg" (🥦)
+7. South Indian Filter Coffee: ₹20, 30 units, 3 mins, spiceLevel: 1 (🌶️), dietaryType: "veg" (🥦)
+
+================================================================================
+6. EXECUTION PLAN
+================================================================================
+1. Copy `05-student-management-app/snapshot` into folder `team-bytebite`.
+2. Configure `server.js` to connect to `mongodb://127.0.0.1:27017` with database name `Hack_SmartCanteen`.
+3. Seed the menu collection on startup if empty.
+4. Implement the backend API routes with strict input and status validation.
+5. Implement the frontend UI with filters, cart, live KDS board, and Web Audio/Vibration alert.
+6. Write a short `README.md` explaining the app, routes, and testing steps.
+7. Make at least 5 clear git commits as you build.
+
+Start by copying the starter files, creating `server.js`, and confirming the database connection.
